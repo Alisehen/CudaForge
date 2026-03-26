@@ -124,7 +124,8 @@ def profile_bench(
     kernel_names: Optional[List[str]] = None,
     conda_bin: Optional[Union[str, Path]] = None,
     out_csv: Union[str, Path] = "ncu_temp.csv",
-    repeat: int = 10,
+    repeat: int = 5,
+    launch_count: int = 5,
     bench_args: Optional[Sequence[Union[str, Path]]] = None,
     ncu_bin: Optional[Union[str, Path]] = None,
 ) -> Path:
@@ -152,12 +153,12 @@ def profile_bench(
         f"--log-file={str(csv_path)}",
         f"--metrics={METRICS}",
         "--launch-skip=0",
-        "--launch-count=10",
+        f"--launch-count={max(1, launch_count)}",
         sys.executable, bench_py,
     ]
     if bench_args:
         cmd.extend(str(arg) for arg in bench_args)
-    cmd.extend(["--repeat", str(repeat)])
+    cmd.extend(["--repeat", str(max(1, repeat))])
 
     # Choose insertion strategy based on number of kernel names
     if kernel_names:
