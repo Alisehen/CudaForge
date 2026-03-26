@@ -126,6 +126,7 @@ def profile_bench(
     out_csv: Union[str, Path] = "ncu_temp.csv",
     repeat: int = 5,
     launch_count: int = 5,
+    timeout_seconds: int = 200,
     bench_args: Optional[Sequence[Union[str, Path]]] = None,
     ncu_bin: Optional[Union[str, Path]] = None,
 ) -> Path:
@@ -174,7 +175,18 @@ def profile_bench(
                 cmd.insert(insert_pos, f"--kernel-name=::regex:^({pattern})(\\(|$)")
 
     print("[ncu] running:", " ".join(cmd))
-    proc = subprocess.run(cmd, env=env, text=True, capture_output=True)
+    try:
+        proc = subprocess.run(
+            cmd,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=max(1, timeout_seconds),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise TimeoutError(
+            f"NCU profiling timed out after {max(1, timeout_seconds)}s: {csv_path}"
+        ) from exc
     if proc.returncode != 0:
         sys.stderr.write(proc.stderr or "")
         raise SystemExit(proc.returncode)

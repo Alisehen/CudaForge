@@ -46,12 +46,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--server_address", default="localhost", help="LLM server address (for vllm/sglang)")
     p.add_argument("--server_port", type=int, default=8000, help="LLM server port (for vllm/sglang)")
     p.add_argument("--model_name", default="deepseek-ai/deepseek-coder-6.7b-instruct", help="LLM model")
-    p.add_argument("--round", "-G", type=int, default=10, help="Number of generations per task")
+    p.add_argument("--round", "-G", type=int, default=8, help="Number of generations per task")
     p.add_argument("--work_dir", type=Path, default=Path("run"), help="Output root directory")
     p.add_argument("--device", type=int, default=0, help="CUDA device index for benchmarking")
     p.add_argument("--ncu-bin", default=os.environ.get("NCU_BIN"), help="Path to Nsight Compute binary")
-    p.add_argument("--ncu-repeat", type=int, default=5, help="Repeat count passed to the NCU benchmark harness")
-    p.add_argument("--ncu-launch-count", type=int, default=5, help="Kernel launches captured by Nsight Compute")
+    p.add_argument("--ncu-repeat", type=int, default=3, help="Repeat count passed to the NCU benchmark harness")
+    p.add_argument("--ncu-launch-count", type=int, default=3, help="Kernel launches captured by Nsight Compute")
     p.add_argument("--ncu-timeout", type=int, default=200, help="Timeout in seconds for a single NCU profiling run")
     p.add_argument("--warmup", type=int, default=5, help="Warm-up iterations")
     p.add_argument("--repeat", type=int, default=20, help="Timed iterations per benchmark")
@@ -516,7 +516,7 @@ def _run_single_task(task_path: Path, args, batch_dir: Path) -> Dict[str, Any]:
     scores: List[float] = []
     err_flags: List[bool] = []
     last_score_for_curve = 0.0  # default baseline for plotting on early failures
-
+    args.round=8
     for round_idx in range(args.round):
         print(f"[{task_path.name}] Round {round_idx}")
 
