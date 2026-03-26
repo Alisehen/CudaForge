@@ -72,19 +72,68 @@ METRICS = ",".join([
 METRIC_COLUMNS: List[str] = [s.strip() for s in METRICS.split(",")]
 
 
+def _resolve_ncu_bin(
+    explicit_ncu_bin: Optional[Union[str, Path]],
+    env_path: str,
+    conda_bin: Optional[Union[str, Path]],
+) -> str:
+    candidates: List[Path] = []
+    seen: set[str] = set()
+
+    def _add(candidate: Optional[Union[str, Path]]) -> None:
+        if not candidate:
+            return
+        path = Path(candidate).expanduser()
+        key = str(path)
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append(path)
+
+    env_override = os.environ.get("NCU_BIN") or os.environ.get("NSIGHT_COMPUTE_BIN")
+    _add(explicit_ncu_bin)
+    _add(env_override)
+    if conda_bin:
+        _add(Path(conda_bin) / "ncu")
+
+    which_in_env = shutil.which("ncu", path=env_path)
+    _add(which_in_env)
+    _add(shutil.which("ncu"))
+    _add("/usr/local/cuda/bin/ncu")
+    _add("/usr/bin/ncu")
+
+    opt_root = Path("/opt/nvidia/nsight-compute")
+    if opt_root.exists():
+        for match in sorted(opt_root.glob("*/ncu"), reverse=True):
+            _add(match)
+
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate.resolve())
+
+    checked = ", ".join(str(path) for path in candidates) or "<none>"
+    raise FileNotFoundError(
+        "Nsight Compute binary 'ncu' was not found. "
+        "Set NCU_BIN or pass --ncu-bin to main.py. "
+        f"Checked: {checked}"
+    )
+
+
 def profile_bench(
     bench_py: str = "bench_ref_inputs.py",
     kernel_names: Optional[List[str]] = None,
-    conda_bin: str = "/root/miniconda3/envs/CudaForge/bin",
+    conda_bin: Optional[Union[str, Path]] = None,
     out_csv: Union[str, Path] = "ncu_temp.csv",
     repeat: int = 10,
     bench_args: Optional[Sequence[Union[str, Path]]] = None,
+    ncu_bin: Optional[Union[str, Path]] = None,
 ) -> Path:
-    ncu_bin = shutil.which("ncu") or "/usr/bin/ncu"
     csv_path = Path(out_csv).resolve()
 
     env = os.environ.copy()
-    env["PATH"] = f"{conda_bin}:{env.get('PATH', '')}"
+    resolved_conda_bin = str(Path(conda_bin).expanduser()) if conda_bin else str(Path(sys.executable).resolve().parent)
+    env["PATH"] = f"{resolved_conda_bin}:{env.get('PATH', '')}"
+    resolved_ncu_bin = _resolve_ncu_bin(ncu_bin, env["PATH"], resolved_conda_bin)
     tmp_ncu_dir = Path.home() / "ncu-tmp"
     tmp_ncu_dir.mkdir(parents=True, exist_ok=True)
     env["TMPDIR"] = str(tmp_ncu_dir)
@@ -93,7 +142,7 @@ def profile_bench(
 
 
     cmd = [
-        ncu_bin,
+        resolved_ncu_bin,
         "--csv",
         "--page=raw",
         "--kernel-name-base=demangled",
@@ -142,6 +191,10 @@ def load_ncu_metrics(
     name_list: Optional[Sequence[str]] = None,  # New: multiple kernel names
     select: str = "last",                       # Selection policy when multiple rows per name
 ) -> pd.DataFrame:
+    def _contains_unit_token(value: Any, tokens: Sequence[str]) -> bool:
+        text = str(value).strip().lower()
+        return any(tok in text for tok in tokens)
+
     csv_path = Path(csv_path)
     if not csv_path.exists():
         raise FileNotFoundError(f"CSV not found: {csv_path}")
@@ -160,9 +213,9 @@ def load_ncu_metrics(
 
     # Drop the units row
     if len(sub) > 0:
-        first_row_str = sub.iloc[0].astype(str).str.lower()
         unit_tokens = ("%", "inst", "cycle", "block", "register", "register/thread")
-        if first_row_str.apply(lambda x: any(tok in x for tok in unit_tokens)).any():
+        first_row = sub.iloc[0].tolist()
+        if any(_contains_unit_token(value, unit_tokens) for value in first_row):
             sub = sub.iloc[1:].reset_index(drop=True)
 
     # Coerce metrics to numeric
@@ -176,10 +229,22 @@ def load_ncu_metrics(
 
     # ========== Extract by kernel name list ==========
     if name_list:
+        if "Kernel Name" not in sub.columns:
+            return pd.DataFrame(columns=keep_cols)
+
+        kernel_name_series = sub["Kernel Name"].map(
+            lambda value: "" if pd.isna(value) else str(value).strip()
+        )
         results = []
         for name in name_list:
+            if name is None:
+                continue
+            needle = str(name).strip()
+            if not needle:
+                continue
+
             # Use contains match instead of exact equality
-            matched = sub[sub["Kernel Name"].astype(str).str.contains(name, regex=False, na=False)]
+            matched = sub[kernel_name_series.str.contains(needle, regex=False, na=False)]
             if matched.empty:
                 continue
             if len(matched) > 1:

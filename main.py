@@ -49,6 +49,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--round", "-G", type=int, default=10, help="Number of generations per task")
     p.add_argument("--work_dir", type=Path, default=Path("run"), help="Output root directory")
     p.add_argument("--device", type=int, default=0, help="CUDA device index for benchmarking")
+    p.add_argument("--ncu-bin", default=os.environ.get("NCU_BIN"), help="Path to Nsight Compute binary")
     p.add_argument("--warmup", type=int, default=5, help="Warm-up iterations")
     p.add_argument("--repeat", type=int, default=20, help="Timed iterations per benchmark")
     p.add_argument("--tol", type=float, default=1e-3, help="Max |err| tolerated")
@@ -581,6 +582,8 @@ def _run_single_task(task_path: Path, args, batch_dir: Path) -> Dict[str, Any]:
                 csv_path = profile_bench(
                     bench_py=str(bench_script),
                     out_csv=str(ncu_csv),
+                    ncu_bin=args.ncu_bin,
+                    repeat=args.repeat,
                     bench_args=[
                         "--ref", str(ref_py),
                         "--test", str(test_kernel),
