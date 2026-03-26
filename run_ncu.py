@@ -195,6 +195,41 @@ def load_ncu_metrics(
         text = str(value).strip().lower()
         return any(tok in text for tok in tokens)
 
+    def _normalize_kernel_name(value: Any) -> str:
+        if pd.isna(value):
+            return ""
+        text = str(value).strip()
+        if not text:
+            return ""
+        text = text.split("(", 1)[0].strip()
+        text = re.sub(r"<.*?>", "", text)
+        if "::" in text:
+            text = text.split("::")[-1]
+        return text.strip().lower()
+
+    def _kernel_tokens(value: Any) -> set[str]:
+        stop_words = {
+            "void", "const", "unsigned", "signed", "long", "int", "float",
+            "double", "half", "at", "native", "cuda", "launch", "bounds",
+        }
+        return {
+            token for token in re.findall(r"[a-z0-9]+", _normalize_kernel_name(value))
+            if token and token not in stop_words
+        }
+
+    def _select_rows(matched: pd.DataFrame) -> pd.DataFrame:
+        if matched.empty:
+            return matched
+        if len(matched) == 1:
+            return matched
+        if select == "first":
+            return matched.iloc[[0]]
+        if select == "last":
+            return matched.iloc[[-1]]
+        if select == "max_cycles" and "sm__cycles_active.avg" in matched.columns:
+            return matched.sort_values("sm__cycles_active.avg", ascending=False).head(1)
+        return matched.iloc[[-1]]
+
     csv_path = Path(csv_path)
     if not csv_path.exists():
         raise FileNotFoundError(f"CSV not found: {csv_path}")
@@ -232,9 +267,10 @@ def load_ncu_metrics(
         if "Kernel Name" not in sub.columns:
             return pd.DataFrame(columns=keep_cols)
 
-        kernel_name_series = sub["Kernel Name"].map(
+        raw_kernel_names = sub["Kernel Name"].map(
             lambda value: "" if pd.isna(value) else str(value).strip()
         )
+        normalized_kernel_names = raw_kernel_names.map(_normalize_kernel_name)
         results = []
         for name in name_list:
             if name is None:
@@ -242,28 +278,72 @@ def load_ncu_metrics(
             needle = str(name).strip()
             if not needle:
                 continue
+            needle_norm = _normalize_kernel_name(needle)
 
-            # Use contains match instead of exact equality
-            matched = sub[kernel_name_series.str.contains(needle, regex=False, na=False)]
+            exact_mask = raw_kernel_names.str.contains(needle, regex=False, na=False)
+            if needle_norm:
+                exact_mask = exact_mask | normalized_kernel_names.str.contains(
+                    needle_norm, regex=False, na=False
+                )
+            matched = sub[exact_mask]
             if matched.empty:
                 continue
-            if len(matched) > 1:
-                if select == "first":
-                    row = matched.iloc[[0]]
-                elif select == "last":
-                    row = matched.iloc[[-1]]
-                elif select == "max_cycles" and "sm__cycles_active.avg" in matched.columns:
-                    row = matched.sort_values("sm__cycles_active.avg", ascending=False).head(1)
-                else:
-                    row = matched.iloc[[-1]]  # fallback
-            else:
-                row = matched
-            results.append(row)
+            results.append(_select_rows(matched))
 
         if results:
             sub = pd.concat(results, ignore_index=True)
         else:
-            sub = pd.DataFrame(columns=keep_cols)
+            fallback_candidates = []
+            seen_candidate_names = set()
+            for norm_name in normalized_kernel_names:
+                if not norm_name or norm_name in seen_candidate_names:
+                    continue
+                seen_candidate_names.add(norm_name)
+                if "kernel" not in norm_name:
+                    continue
+                if norm_name.startswith("vectorized_elementwise_kernel"):
+                    continue
+                matched = sub[normalized_kernel_names == norm_name]
+                if matched.empty:
+                    continue
+                fallback_candidates.append(
+                    (norm_name, _kernel_tokens(norm_name), _select_rows(matched))
+                )
+
+            fallback_rows = []
+            used_candidate_names = set()
+            for name in name_list:
+                needle_norm = _normalize_kernel_name(name)
+                needle_tokens = _kernel_tokens(needle_norm)
+                if not needle_tokens:
+                    continue
+
+                best_name = None
+                best_row = None
+                best_score = 0.0
+                for candidate_name, candidate_tokens, candidate_row in fallback_candidates:
+                    if candidate_name in used_candidate_names:
+                        continue
+                    overlap = len(needle_tokens & candidate_tokens) / len(needle_tokens)
+                    if overlap <= 0.0:
+                        continue
+                    containment_bonus = 0.25 if (
+                        needle_norm in candidate_name or candidate_name in needle_norm
+                    ) else 0.0
+                    score = overlap + containment_bonus
+                    if score > best_score:
+                        best_name = candidate_name
+                        best_row = candidate_row
+                        best_score = score
+
+                if best_name is not None and best_row is not None and best_score >= 0.60:
+                    used_candidate_names.add(best_name)
+                    fallback_rows.append(best_row)
+
+            if fallback_rows:
+                sub = pd.concat(fallback_rows, ignore_index=True)
+            else:
+                sub = pd.DataFrame(columns=keep_cols)
 
     return sub
 
