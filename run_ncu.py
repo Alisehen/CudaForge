@@ -77,7 +77,7 @@ def profile_bench(
     kernel_names: Optional[List[str]] = None,
     conda_bin: str = "/root/miniconda3/envs/CudaForge/bin",
     out_csv: Union[str, Path] = "ncu_temp.csv",
-    repeat: int = 100,
+    repeat: int = 10,
 ) -> Path:
     ncu_bin = shutil.which("ncu") or "/usr/bin/ncu"
     csv_path = Path(out_csv).resolve()
@@ -102,7 +102,7 @@ def profile_bench(
         f"--log-file={str(csv_path)}",
         f"--metrics={METRICS}",
         "--launch-skip=0",
-        "--launch-count=20",
+        "--launch-count=10",
         sys.executable, bench_py,
         "--repeat", str(repeat),
     ]
