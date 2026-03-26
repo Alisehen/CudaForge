@@ -563,13 +563,22 @@ def compare_and_bench(
                     ref_out = ref_out.cpu()
                     test_out = test_out.cpu()
 
-
             # 误差 & allclose
-            diff = (test_out - ref_out).abs()
-            max_err  = diff.max().item()
-            mean_err = diff.mean().item()
+            if ref_out.is_floating_point() or ref_out.is_complex():
+                compare_ref = ref_out
+                compare_test = test_out
+                outputs_close = torch.allclose(compare_ref, compare_test, atol=tol, rtol=tol)
+            else:
+                # Integer / bool outputs should match exactly, but cast for error summaries.
+                compare_ref = ref_out.to(torch.float32)
+                compare_test = test_out.to(torch.float32)
+                outputs_close = torch.equal(ref_out, test_out)
 
-            if not torch.allclose(ref_out, test_out, atol=tol, rtol=tol):
+            diff = (compare_test - compare_ref).abs()
+            max_err = diff.max().item() if diff.numel() > 0 else 0.0
+            mean_err = diff.mean().item() if diff.numel() > 0 else 0.0
+
+            if not outputs_close:
                 raise ValueError(
                     f"Outputs are not close (atol={tol}, rtol={tol}). "
                     f"max_abs_err={max_err:.3e}, mean_abs_err={mean_err:.3e}"
@@ -648,4 +657,3 @@ def _cli():
 
 if __name__ == "__main__":
     _cli()
-
