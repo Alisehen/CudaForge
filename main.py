@@ -1,6 +1,7 @@
 # main.py
 from __future__ import annotations
 import argparse
+import os
 import re
 import random
 import time
@@ -78,6 +79,25 @@ def _build_run_tag(server_type: str, model_name: str) -> str:
     server_tag = _slugify_tag(server_type)
     model_tag = _slugify_tag(model_name)
     return f"{server_tag}_{model_tag}"
+
+
+def _build_temp_artifact_tag(args) -> str:
+    """Build a per-process tag for temporary ref/test/profile artifacts."""
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    visible_tag = _slugify_tag(visible, max_len=32) if visible else "all"
+    return f"sp{args.subproc_id}_dev{args.device}_pid{os.getpid()}_{visible_tag}"
+
+
+def _resolve_bench_script(root_dir: Path, subproc_id: int) -> Path:
+    candidate = root_dir / f"bench_ref_inputs_{subproc_id}.py"
+    if candidate.exists():
+        return candidate
+
+    fallback = root_dir / "bench_ref_inputs_0.py"
+    if fallback.exists():
+        return fallback
+
+    raise FileNotFoundError("bench_ref_inputs benchmark harness not found")
 
 
 # ---------------------- small utils --------------------
@@ -474,8 +494,11 @@ def _run_single_task(task_path: Path, args, batch_dir: Path) -> Dict[str, Any]:
 
     # === Write the contents of task_path into root/ref.py ===
     root_dir = Path(__file__).resolve().parent
-    ref_py = root_dir / f"ref_{args.subproc_id}.py"
-    test_kernel = root_dir / f"test_kernel_{args.subproc_id}.py"
+    artifact_tag = _build_temp_artifact_tag(args)
+    ref_py = root_dir / f"ref_{artifact_tag}.py"
+    test_kernel = root_dir / f"test_kernel_{artifact_tag}.py"
+    bench_script = _resolve_bench_script(root_dir, args.subproc_id)
+    ncu_csv = root_dir / f"ncu_temp_{artifact_tag}.csv"
     content = task_path.read_text(encoding="utf-8")  # read source from task_path
     with open(ref_py, "w", encoding="utf-8") as f:
         f.write(content)
@@ -556,7 +579,14 @@ def _run_single_task(task_path: Path, args, batch_dir: Path) -> Dict[str, Any]:
                 print("=============================================================")
                 print(f"Detected kernel names: {kernel_names}")
                 csv_path = profile_bench(
-                    bench_py=f"bench_ref_inputs_{args.subproc_id}.py", out_csv=f"ncu_temp_{args.subproc_id}.csv")
+                    bench_py=str(bench_script),
+                    out_csv=str(ncu_csv),
+                    bench_args=[
+                        "--ref", str(ref_py),
+                        "--test", str(test_kernel),
+                        "--device-idx", str(args.device),
+                    ],
+                )
                 metrics_df = load_ncu_metrics(csv_path, extra_keep=("Kernel Name",),
                                               name_list=kernel_names, select="last")
                 metrics_block = metrics_to_prompt(metrics_df)
