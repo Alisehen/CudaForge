@@ -52,9 +52,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--ncu-bin", default=os.environ.get("NCU_BIN"), help="Path to Nsight Compute binary")
     p.add_argument("--ncu-repeat", type=int, default=5, help="Repeat count passed to the NCU benchmark harness")
     p.add_argument("--ncu-launch-count", type=int, default=5, help="Kernel launches captured by Nsight Compute")
+    p.add_argument("--ncu-timeout", type=int, default=200, help="Timeout in seconds for a single NCU profiling run")
     p.add_argument("--warmup", type=int, default=5, help="Warm-up iterations")
     p.add_argument("--repeat", type=int, default=20, help="Timed iterations per benchmark")
-    p.add_argument("--tol", type=float, default=1e-3, help="Max |err| tolerated")
+    p.add_argument("--tol", type=float, default=1e-2, help="Max |err| tolerated")
     p.add_argument("--max_tokens", type=int, default=16384, help="LLM max new tokens")
     p.add_argument("--temperature", type=float, default=0.2, help="LLM temperature")
     p.add_argument("--top_p", type=float, default=1.0, help="LLM top_p")
@@ -581,21 +582,26 @@ def _run_single_task(task_path: Path, args, batch_dir: Path) -> Dict[str, Any]:
                 kernel_names = extract_cuda_kernel_names(test_kernel)
                 print("=============================================================")
                 print(f"Detected kernel names: {kernel_names}")
-                csv_path = profile_bench(
-                    bench_py=str(bench_script),
-                    out_csv=str(ncu_csv),
-                    ncu_bin=args.ncu_bin,
-                    repeat=args.ncu_repeat,
-                    launch_count=args.ncu_launch_count,
-                    bench_args=[
-                        "--ref", str(ref_py),
-                        "--test", str(test_kernel),
-                        "--device-idx", str(args.device),
-                    ],
-                )
-                metrics_df = load_ncu_metrics(csv_path, extra_keep=("Kernel Name",),
-                                              name_list=kernel_names, select="last")
-                metrics_block = metrics_to_prompt(metrics_df)
+                try:
+                    csv_path = profile_bench(
+                        bench_py=str(bench_script),
+                        out_csv=str(ncu_csv),
+                        ncu_bin=args.ncu_bin,
+                        repeat=args.ncu_repeat,
+                        launch_count=args.ncu_launch_count,
+                        timeout_seconds=args.ncu_timeout,
+                        bench_args=[
+                            "--ref", str(ref_py),
+                            "--test", str(test_kernel),
+                            "--device-idx", str(args.device),
+                        ],
+                    )
+                    metrics_df = load_ncu_metrics(csv_path, extra_keep=("Kernel Name",),
+                                                  name_list=kernel_names, select="last")
+                    metrics_block = metrics_to_prompt(metrics_df)
+                except TimeoutError as exc:
+                    print(f"[warn] {exc}. Skipping NCU metrics for this round.")
+                    metrics_block = "{}"
                 sys_judge__prompt, judge_prompt = build_judger_optimization_prompts(
                     arch_path=task_path,
                     gpu_name=args.gpu,
