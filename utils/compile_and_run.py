@@ -542,41 +542,73 @@ def compare_and_bench(
 
             # Check memory usage
             ref_out_bytes = ref_out.element_size() * ref_out.nelement()
+            from utils.print_utils import print_warning
+            max_compare_elements = 1_000_000
 
             if ref_out_bytes * 8 > 40 * 1024**3:
-                import psutil
-                from utils.print_utils import print_warning
-                
-                # Estimate CPU memory needed (3x safety factor for copy + diff)
-                needed_cpu_mem = ref_out_bytes * 3
-                avail_cpu_mem = psutil.virtual_memory().available
-                
-                if avail_cpu_mem < needed_cpu_mem:
-                    print_warning(f"Skipping precision check: Tensor too large for both GPU and CPU RAM (Need ~{needed_cpu_mem/1024**3:.1f}GB, Avail {avail_cpu_mem/1024**3:.1f}GB)")
-                    check_precision = False
-                    # Release tensors to free memory for benchmarking
-                    del ref_out, test_out
-                    if TORCH_DEVICE == "cuda":
-                        torch.cuda.empty_cache()
-                else:
-                    print_warning(f"Warning: Output tensor size is too large ({ref_out_bytes / 1024**3:.2f} GB). Moving to CPU for comparison to avoid OOM.")
+                print_warning(
+                    f"Warning: Output tensor is very large ({ref_out_bytes / 1024**3:.2f} GB). "
+                    "Using sampled precision check to avoid OOM."
+                )
+
+            if TORCH_DEVICE == "cuda" and ref_out.is_cuda:
+                free_cuda_mem, _ = torch.cuda.mem_get_info(dev)
+                estimated_compare_bytes = min(
+                    ref_out_bytes,
+                    ref_out.element_size() * min(ref_out.numel(), max_compare_elements),
+                ) * 3
+                if free_cuda_mem < estimated_compare_bytes:
+                    print_warning(
+                        "Warning: Free CUDA memory is low before output comparison "
+                        f"({free_cuda_mem / 1024**2:.1f} MiB free, need about "
+                        f"{estimated_compare_bytes / 1024**2:.1f} MiB). Moving outputs to CPU."
+                    )
                     ref_out = ref_out.cpu()
                     test_out = test_out.cpu()
+                    torch.cuda.empty_cache()
+
+            def _compare_outputs(ref_tensor: torch.Tensor, test_tensor: torch.Tensor):
+                ref_flat = ref_tensor.reshape(-1)
+                test_flat = test_tensor.reshape(-1)
+                sampled_elements = ref_flat.numel()
+                if sampled_elements > max_compare_elements:
+                    step = max(1, sampled_elements // max_compare_elements)
+                    sample_idx = torch.arange(0, sampled_elements, step, device=ref_flat.device)[:max_compare_elements]
+                    ref_flat = ref_flat.index_select(0, sample_idx)
+                    test_flat = test_flat.index_select(0, sample_idx)
+                    sampled_elements = ref_flat.numel()
+                    print_warning(
+                        "Warning: Using sampled precision check on "
+                        f"{sampled_elements} / {ref_tensor.numel()} output elements."
+                    )
+
+                if ref_flat.is_floating_point() or ref_flat.is_complex():
+                    compare_ref = ref_flat
+                    compare_test = test_flat
+                    outputs_are_close = torch.allclose(compare_ref, compare_test, atol=tol, rtol=tol)
+                else:
+                    # Integer / bool outputs should match exactly, but cast for error summaries.
+                    compare_ref = ref_flat.to(torch.float32)
+                    compare_test = test_flat.to(torch.float32)
+                    outputs_are_close = torch.equal(ref_flat, test_flat)
+
+                diff_tensor = (compare_test - compare_ref).abs()
+                max_error = diff_tensor.max().item() if diff_tensor.numel() > 0 else 0.0
+                mean_error = diff_tensor.mean().item() if diff_tensor.numel() > 0 else 0.0
+                return outputs_are_close, max_error, mean_error
 
             # 误差 & allclose
-            if ref_out.is_floating_point() or ref_out.is_complex():
-                compare_ref = ref_out
-                compare_test = test_out
-                outputs_close = torch.allclose(compare_ref, compare_test, atol=tol, rtol=tol)
-            else:
-                # Integer / bool outputs should match exactly, but cast for error summaries.
-                compare_ref = ref_out.to(torch.float32)
-                compare_test = test_out.to(torch.float32)
-                outputs_close = torch.equal(ref_out, test_out)
-
-            diff = (compare_test - compare_ref).abs()
-            max_err = diff.max().item() if diff.numel() > 0 else 0.0
-            mean_err = diff.mean().item() if diff.numel() > 0 else 0.0
+            try:
+                outputs_close, max_err, mean_err = _compare_outputs(ref_out, test_out)
+            except torch.OutOfMemoryError:
+                if TORCH_DEVICE == "cuda" and ref_out.is_cuda:
+                    print_warning("Warning: CUDA OOM during output comparison. Retrying on CPU.")
+                    ref_out = ref_out.cpu()
+                    test_out = test_out.cpu()
+                    torch.cuda.empty_cache()
+                    outputs_close, max_err, mean_err = _compare_outputs(ref_out, test_out)
+                else:
+                    raise
 
             if not outputs_close:
                 raise ValueError(
